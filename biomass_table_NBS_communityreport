@@ -1,0 +1,432 @@
+---
+title: ''
+params:
+  start_year: '2010'
+  end_year: '2019'
+  Ntable: 18
+output:
+  pdf_document:
+    latex_engine: xelatex
+mainfont: Times New Roman
+fontsize: 12pt
+header-includes:
+   \AtBeginDocument{\let\maketitle\relax}
+---
+
+```{r setup, include=FALSE}
+## IMPORTANT: beginning line ~378 and ~ 400 manual changes to year or additional columns 
+##            for years after 2019 must be done.
+
+## IMPORTANT: type in ORACLE username and passwork (lines 42 and 45). I have not come up with a way
+##            not to store these data (yet)
+
+## dplyr package is used to manipulate data (filter, select, mutate, etc.)
+library(dplyr)
+## RODBC package connects R to Oracle database
+library(RODBC)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+
+## to transpose YEARS 
+library(reshape2) 
+
+
+
+
+
+
+## establishes connection to Oracle- need Oracle username and password
+
+## type in ORACLE username between quotes
+id <- ""
+
+## type in ORACLE password between quotes
+pw <- ""
+
+channel <- odbcConnect(dsn = "AFSC", 
+                       uid = id, 
+                       pwd = pw,
+                       believeNRows = FALSE)
+###############################################################################################
+
+## IMPORTANT NOTE: this query CONTAINS DATA FROM OTHER SURVEYS 
+####  (vessels: 1, 14, 57 - not used on NBS)
+catch_table <- sqlQuery(channel, "
+                        SELECT species_code, a.haul, weight, number_fish, a.vessel, a.hauljoin
+                        
+                        FROM RACEBASE.CATCH a
+                        
+                        JOIN RACEBASE.HAUL b 
+                        
+                        ON a.hauljoin = b.hauljoin
+                        
+                        WHERE 
+                            
+                            a.region = 'BS' AND
+                            a.cruise LIKE '%%%%02' AND
+                            haul_type = 3 AND 
+                            performance >= 0;
+                            ")
+
+##### check for list of vessels
+##########catch_table %>%
+  #############distinct(VESSEL)
+  
+# get hauls- survey_definition_id 143 is exclusively groundfish NBS data
+####### NOTE: haul type 3 is standard survey stations; however, haul type
+#######       15- gear 44 was used in 2019 for 3 additional stations that 
+#######       were not included in the biomass calculation in 2019
+NBS_haul_table <- sqlQuery(channel, "
+                      SELECT a.cruise, b.year, a.stratum, a.vessel,
+                             a.stationid, a.haul, a.gear_depth, a.duration, a.distance_fished, 
+                             a.net_width, a.net_height, a.hauljoin 
+                
+                      FROM RACEBASE.HAUL a
+         
+                      JOIN RACE_DATA.V_CRUISES b
+         
+                      ON a.cruisejoin = b.cruisejoin 
+         
+                      WHERE
+                         survey_definition_id = 143 AND
+                         performance >= 0  AND 
+                         haul_type = 3 AND
+                         a.cruise LIKE '%%%%02';
+                      ")
+
+## takes out station AA-10 from years prior to 2019 (station was removed in 2019)
+## NOTE: reports that include 2010 and 2019 data (biomass) will be different due to the 
+##### presence of station AA-10 in the calculations
+NBS_haul_table <- NBS_haul_table %>%
+  filter(STATIONID != 'AA-10')
+
+
+## combine catch_table with NBS_haul_table to extract species data for assign_groups table
+NBS_hauls_catches <- NBS_haul_table %>%
+  left_join(catch_table) %>%
+  select(VESSEL, HAUL, SPECIES_CODE, WEIGHT, NUMBER_FISH, HAULJOIN)
+
+## use NBS_hauls_catches to get list of all species caught
+species_list <- distinct(NBS_hauls_catches, SPECIES_CODE)
+
+#############################################################################
+
+#### This section joins catch data with zeros table and fills in the zeros columns
+
+
+# joins species_list with NBS_haul_table, every haul has every species (uses tidyr pkg)
+join_zeros <- crossing(NBS_haul_table, species_list)
+
+#add new column (weight) and assigns NAs, NOTE 0s are a place holder and column is deleted later
+### in the code
+join_zeros$WEIGHT <- rep(0, nrow(join_zeros))
+
+#add new column (number_fish) and assigns NAs, NOTE 0s are a place holder and column is deleted 
+### later in the code
+join_zeros$NUMBER_FISH <- rep(0, nrow(join_zeros))
+
+##############################################################################
+
+
+## assigns groups based on species code
+## 2 "other crab" groups because species codes 69010: 69200 are hermit crabs
+assign_group_zeros <- join_zeros %>% 
+  mutate(group = case_when(
+    SPECIES_CODE == 69323 ~ "blue king crab",
+    SPECIES_CODE == 21368 ~ "warty sculpin_Myoxocephalus@scorpius",
+    SPECIES_CODE == 10261 ~ "northern rock sole",
+    SPECIES_CODE == 10220 ~ "starry flounder",
+    SPECIES_CODE == 21110 ~ "Pacific herring",
+    SPECIES_CODE == 10140 ~ "Bering flounder",
+    SPECIES_CODE == 71884 ~ "Neptune whelk_Neptunea@heros",
+    SPECIES_CODE == 21371 ~ "plain sculpin",
+    SPECIES_CODE == 81742 ~ "purple-orange sea star",
+    SPECIES_CODE == 10285 ~ "Alaska plaice",
+    SPECIES_CODE == 471 ~ "Alaska skate",
+    SPECIES_CODE == 10210 ~ "yellowfin sole",
+    SPECIES_CODE == 69322 ~ "red king crab",
+    SPECIES_CODE == 21735 ~ "saffron cod",
+    SPECIES_CODE == 10120 ~ "Pacific halibut",
+    SPECIES_CODE == 68580 ~ "snow crab",
+    SPECIES_CODE == 21725 ~ "Arctic cod",
+    SPECIES_CODE == 21921 ~ "Atka mackeral",
+    SPECIES_CODE == 68560 ~ "Tanner crab",
+    SPECIES_CODE >= 66000 & SPECIES_CODE <= 67499 ~ "all shrimps_",
+    SPECIES_CODE >= 21740 & SPECIES_CODE <= 21741 ~ "walleye pollock",
+    SPECIES_CODE >= 21720 & SPECIES_CODE <= 21721 ~ "Pacific cod",
+    SPECIES_CODE >= 83020 & SPECIES_CODE <= 83022 ~ "basket starfish_Gorgonocephalus@eucnemis",
+    SPECIES_CODE >= 97000 & SPECIES_CODE <= 97120 ~ "brachiopods",
+    SPECIES_CODE >= 83000 & SPECIES_CODE <= 83701 ~ "brittle stars and sand dollars_",
+    SPECIES_CODE >= 82730 & SPECIES_CODE <= 82741 ~ "brittle stars and sand dollars_",
+    SPECIES_CODE >= 95000 & SPECIES_CODE <= 95199 ~ "byrozoans_Bryozoa",
+    SPECIES_CODE >= 70100 & SPECIES_CODE <= 70151 ~ "chitons",
+    SPECIES_CODE >= 74000 & SPECIES_CODE <= 75799 ~ "clams, mussels, scallops_Bivalvia",
+    SPECIES_CODE >= 41100 & SPECIES_CODE <= 41499 ~ "corals_Anthozoa",
+    SPECIES_CODE >= 44000 & SPECIES_CODE <= 44499 ~ "corals_Anthozoa",
+    SPECIES_CODE >= 44890 & SPECIES_CODE <= 44999 ~ "corals_Anthozoa",
+    SPECIES_CODE >= 24100 & SPECIES_CODE <= 24395 ~ "eelpouts_Zoarcidae",
+    SPECIES_CODE >= 99990 & SPECIES_CODE <= 99998 ~ "empty shells and debris",
+    SPECIES_CODE >= 69010 & SPECIES_CODE <= 69249 ~ "hermit crabs_Paguridae",
+    SPECIES_CODE >= 40060 & SPECIES_CODE <= 40999 ~ "jellyfishes_Scyphozoa",
+    SPECIES_CODE >= 22170 & SPECIES_CODE <= 22199 ~ "lumpsuckers",
+    SPECIES_CODE >= 78010 & SPECIES_CODE <= 78499 ~ "octopuses",
+    SPECIES_CODE >= 68000 & SPECIES_CODE <= 69009 ~ "other crabs_",
+    SPECIES_CODE >= 69201 & SPECIES_CODE <= 69549 ~ "other crabs_",
+    SPECIES_CODE >= 10000 & SPECIES_CODE <= 10399 ~ "other flatfishes_Pleuronectidae",
+    SPECIES_CODE >= 21300 & SPECIES_CODE <= 21499 ~ "other sculpins_Cottidae",
+    SPECIES_CODE >= 80000 & SPECIES_CODE <= 82499 ~ "other sea stars_Asteroidea",
+    SPECIES_CODE >= 71000 & SPECIES_CODE <= 73999 ~ "other snails_Gastropoda",
+    SPECIES_CODE >= 20000 & SPECIES_CODE <= 20099 ~ "poachers_Agonidae",
+    SPECIES_CODE >= 23800 & SPECIES_CODE <= 23870 ~ "pricklebacks_Stichaeidae",
+    SPECIES_CODE >= 23200 & SPECIES_CODE <= 23310 ~ "salmonids",
+    SPECIES_CODE >= 82730 & SPECIES_CODE <= 82740 ~ "sand dollar",
+    SPECIES_CODE >= 43000 & SPECIES_CODE <= 43999 ~ "sea anemones_Actiniaria",
+    SPECIES_CODE >= 85000 & SPECIES_CODE <= 85500 ~ "sea cucumbers_Holothuroidea",
+    SPECIES_CODE >= 82500 & SPECIES_CODE <= 82691 ~ "sea urchins_Strongylocentrotus@spp.",
+    SPECIES_CODE >= 23000 & SPECIES_CODE <= 23071 ~ "smelts_Osmeridae",
+    SPECIES_CODE >= 22200 & SPECIES_CODE <= 22299 ~ "snailfishes_Liparidae",
+    SPECIES_CODE >= 91000 & SPECIES_CODE <= 91999 ~ "sponges",
+    SPECIES_CODE >= 98000 & SPECIES_CODE <= 99909 ~ "tunicates_Urochordata",
+    SPECIES_CODE >= 50000 & SPECIES_CODE <= 59999 ~ "misc worms_",
+    SPECIES_CODE >= 92000 & SPECIES_CODE <= 97499 ~ "misc worms_",
+    SPECIES_CODE >= 20300 & SPECIES_CODE <= 20399 ~ "wolffishes",
+    SPECIES_CODE >= 21900 & SPECIES_CODE <= 21935 ~ "greenlings",
+    SPECIES_CODE >= 21752 & SPECIES_CODE <= 21753 ~ "sticklebacks",
+    SPECIES_CODE >= 40010 & SPECIES_CODE <= 40050 ~ "hydroids",
+    SPECIES_CODE >= 20200 & SPECIES_CODE <= 20204 ~ "sand lances",
+    SPECIES_CODE >= 78502 & SPECIES_CODE <= 79001 ~ "squids",
+    SPECIES_CODE >= 79020 & SPECIES_CODE <= 79513 ~ "squids",
+    SPECIES_CODE >= 82750 & SPECIES_CODE <= 82775 ~ "sea lilies",
+    SPECIES_CODE == 474 | 401 | 402 | 403 | 421 | 436 ~ "skate egg cases",
+    SPECIES_CODE == 1 ~ "fish eggs",
+    
+    
+    
+    TRUE ~ "other"))
+
+
+
+
+## overwrite NAs in assign_group_zeros where data exists
+catch_and_zeros <- assign_group_zeros %>%
+  left_join(NBS_hauls_catches, by = c("SPECIES_CODE", "HAULJOIN")) %>%
+  select(-HAUL.y, -WEIGHT.x, -NUMBER_FISH.x, -VESSEL.y) %>%
+  rename(HAUL = HAUL.x, WEIGHT_kg = WEIGHT.y, NUMBER_FISH = NUMBER_FISH.y, VESSEL = VESSEL.x) %>% 
+  select(CRUISE, YEAR, STRATUM, VESSEL, HAUL, GEAR_DEPTH, SPECIES_CODE, group, WEIGHT_kg, NUMBER_FISH, 
+         everything()) %>%
+  replace(is.na(.), 0)
+
+#### a check for species with weights greater then 0
+###### l<- catch_and_zeros %>%
+  #####filter(SPECIES_CODE == 99991, YEAR == 2019, WEIGHT_kg > 0)
+
+## sum catch weight (by groups) by station and join to haul table (again) to add on relevent haul data
+catch_summed_by_station <- catch_and_zeros %>%
+  group_by(YEAR, STATIONID, group, HAULJOIN) %>%
+  summarise_at(vars(wt_kg_summed_by_station = WEIGHT_kg, 
+                    num_summed_by_station = NUMBER_FISH), sum) %>%
+  left_join(NBS_haul_table, by = c('HAULJOIN', 'STATIONID', 'YEAR'))
+
+###########################################
+## checks catch_and_zeros table for species that are not in groups, if species are not grouped
+#### add group to assign_groups table
+other_species <- catch_summed_by_station %>%
+  filter(group == "other") 
+
+print(other_species)
+###########################################
+
+## write other_species to .csv table if needed
+#write.csv(other_species,"G:/HaehnR/rScripts/species_by_group/other_species.csv")
+
+
+###########################################################################
+
+## calculates CPUE for each species group by station
+CPUE <- catch_summed_by_station %>%
+  mutate(effort = DISTANCE_FISHED * NET_WIDTH/10) %>%
+  mutate(CPUE_weight_kgperhect = wt_kg_summed_by_station/effort) %>%
+  mutate(CPUE_number_perhect = ifelse(wt_kg_summed_by_station > 0 & num_summed_by_station == 0, NA, 
+                              (CPUE_number = num_summed_by_station/effort))) 
+
+
+###########################################
+#### this is to check CPUEs by group, station and year against the SQL code
+##group_check <- CPUE %>%
+  #filter(group == 'byrozoans', YEAR == 2017, wt_kg_summed_by_station > 0) 
+
+##summarise(group_check, mean_CPUE_wt_kgperhect = sum(mean(CPUE_weight_kgperhect)))
+
+##write.csv(group_check,"G:/HaehnR/rScripts/species_by_group/by_haul_check.csv")
+###########################################
+
+####################################################################
+
+## gathers area for strata from Oracle, 2019 is the most recent iteration
+NBS_stratum_area <- sqlQuery(channel, "
+                        SELECT year, stratum, area 
+    
+                        FROM RACEBASE.STRATUM
+    
+                        WHERE 
+                            stratum in(70, 71, 81) AND 
+                            region = 'BS' AND
+                            year = 2019;
+                           ") 
+####################################################################
+
+## cannot join by YEAR bc area is calculated using 2019 
+## add area to CPUE table
+CPUE_by_group_per_haul <- CPUE %>%
+  group_by(YEAR, STRATUM, group) %>%
+  left_join(NBS_stratum_area, by = 'STRATUM') %>%
+  select(-YEAR.y) %>%
+  rename( YEAR = YEAR.x) 
+
+##########################################
+##check CPUE against SQL scripts
+#check <- CPUE_by_group_per_haul %>%
+ #filter(group == "snailfishes")
+
+##########################################
+
+# calculates total area by adding up the unique area values (each strata has a different value)
+total_area <- sum(unique(CPUE_by_group_per_haul$AREA))
+  
+############################################################################
+
+f <- CPUE_by_group_per_haul %>%
+  group_by(YEAR, group)
+  
+## calculates mean CPUE (weight) by year, group, stratum, and area
+g <- f %>%
+  group_by(YEAR, group, STRATUM, AREA) %>%
+  summarise(mean(CPUE_weight_kgperhect)) %>%
+  rename(CPUE_by_group_stratum = 'mean(CPUE_weight_kgperhect)') 
+
+## creates column for meanCPUE per group/stratum/year*area of stratum
+g$mean_cpue_times_area <- g$CPUE_by_group_stratum * g$AREA
+
+## calculates sum of mean CPUE*area (over the 3 strata)
+h <- g %>%
+  group_by(YEAR, group) %>%
+  summarise(sum(mean_cpue_times_area)) %>%
+  rename(mean_CPUE_all_strata_times_area = 'sum(mean_cpue_times_area)')
+
+## creates column with weighted CPUEs
+h$weighted_CPUE <- h$mean_CPUE_all_strata_times_area / total_area
+
+#############################################################################
+
+### ***NOTE*** NOT WEIGHTED ##############################
+#biomass <- CPUE_by_group_per_haul %>%
+  #group_by(YEAR, group) %>%
+  #summarise_at(vars(mean_CPUE_by_year_group_wt_kgperhec = CPUE_weight_kgperhect,
+                    #mean_CPUE_by_year_group_numperhect = CPUE_number_perhect), mean) %>%
+ #mutate(biomass_metric_ton = mean_CPUE_by_year_group_wt_kgperhec*(total_area*.1))
+
+#write.csv(biomass, file = "G:/EBSreports/NBS_report/2019/grouped_biomass.csv")
+
+############################################################
+
+```
+
+**Table 1.** List of the major taxa sampled in the NBS bottom trawl survey and the percentage change in biomass (metric tons) from `r params$start_year` to `r params$end_year`, in descending order of % change.
+
+
+
+```{r results= 'asis', echo=F, message=F, warning=F}
+### uses WEIGHTED CPUEs to calculate biomass
+## includes empty shells and debris
+w_biomass <- h %>%
+  group_by(YEAR, group) %>%
+  mutate(biomass_metric_ton = weighted_CPUE*(total_area*.1))
+
+#prints total biomass excluding empty shells and debris for each year
+w_biomass_no_EMPTY <- w_biomass %>%
+  filter(group != 'empty shells and debris')
+
+##################### table
+
+## select species names, codes, common names
+species_names <- sqlQuery(channel, "
+                          SELECT species_code, common_name, species_name 
+                          
+                          FROM RACEBASE.SPECIES;
+                          ")
+
+## place @ symbol between genus and species. WHY? the names need to be italicized
+##                                                later in the script and the code
+##                                                searches for the @ symbol to 
+##                                                determine which rows to italicize
+species_names$SPECIES_NAME <- gsub(" ", "@", species_names$SPECIES_NAME)
+
+## inital table- combines common name and taxon so both are asssociated with a 
+##               species code
+NBS_biomass_table <- w_biomass_no_EMPTY %>%
+  rename(COMMON_NAME = group) %>%
+  left_join(species_names) %>%
+  select(YEAR, COMMON_NAME, SPECIES_NAME, biomass_metric_ton) %>%
+  rename("Taxon" = SPECIES_NAME) %>%
+  mutate(names = paste(COMMON_NAME, Taxon, sep = "_"))
+
+## dcast uses reshape2 pkg
+## creates a biomass column for each year
+all_group_tbl <- dcast(NBS_biomass_table, names ~ YEAR, value.var = "biomass_metric_ton")
+
+
+## creates column with percent sign
+all_group_tbl$symbol <- rep('%')
+
+##  calculate percent change, seperate group (common name) and taxon, filter out groups
+## change symbols/percents to red text if negative 
+with_percent_change <- all_group_tbl %>%
+  mutate((`2019` - `2010`) / `2010` * 100) %>%
+  rename(Change = "(`2019` - `2010`)/`2010` * 100") %>%
+  separate(names, c("group", "Taxon", "extra"), sep = "_") %>%
+  arrange(desc(Change)) %>%
+  filter(Change != Inf, group != paste("greenlings"), group != "sand lances", group != "salmonids",
+         group != "wolffishes", group != "chitons", group != "skate egg cases", group != "hydroids",
+         group != "sponges", group != "lumpsuckers", group != "octopuses", group != "Tanner crab") %>%
+  select(-extra) %>%
+  mutate_if(is.numeric, round, 0) %>%
+  mutate(symbol = cell_spec(symbol, "latex", 
+                            color = ifelse(Change < 0, "red", "black"))) %>%
+  mutate(Change = cell_spec(Change, "latex", 
+                            color = ifelse(Change < 0, "red", "black"))) %>%
+  mutate(Taxon = cell_spec(Taxon, "latex",
+                           italic = ifelse(grepl("\\@", Taxon), T, F))) %>%
+                           ## grep1 return a true or false, use "\\" to escape symbol
+  rename("Common name" = group) 
+
+## remove @ symbol
+with_percent_change$Taxon <- gsub("@", " ", with_percent_change$Taxon)
+
+## format commas in large numbers and combine Change and symbol columns into 1 column 
+with_percent_change <- with_percent_change %>%
+  mutate(Change = prettyNum(with_percent_change$Change, big.mark=",")) %>%
+  mutate(`2017` = prettyNum(with_percent_change$`2017` , big.mark=",")) %>%
+  mutate(`2010` = prettyNum(with_percent_change$`2010` , big.mark=",")) %>%
+  mutate(`2019` = prettyNum(with_percent_change$`2019` , big.mark=",")) %>%
+  mutate(Change = paste(Change, symbol, sep = "")) %>%
+  select(-symbol)
+  
+
+
+
+
+
+kable(with_percent_change,
+      format = "latex",
+      align = c("l", "l", "r", "r", "r", "r"),
+      booktabs = T,
+      escape = F, #need this to make negitive %s red
+      linesep = "") %>% #removes spaces btwn every 5 lines
+  kable_styling(latex_options = "scale_down") %>%
+            row_spec(0, bold = T) 
+
+
+  
+```
+
